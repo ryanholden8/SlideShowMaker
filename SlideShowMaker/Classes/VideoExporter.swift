@@ -38,7 +38,7 @@ public class VideoExporter: NSObject {
         self.videoItem = item
     }
     
-    public func export() {
+    public func export(filename: String) {
         guard let item = self.videoItem else {
             self.exportingBlock?(false, 0, nil, NSError(domain: "video item is empty", code: 0, userInfo: nil))
             return
@@ -48,7 +48,7 @@ public class VideoExporter: NSObject {
         self.addTrack(item: item, composition: self.mixComposition)
         let videoCompositionTrack = self.mixComposition.track(withTrackID: videoTrackID)!
         
-        let timeRange = CMTimeRange(start: kCMTimeZero, duration: item.video.duration)
+        let timeRange = CMTimeRange(start: CMTime.zero, duration: item.video.duration)
         
         self.insert(
             item: item,
@@ -61,7 +61,7 @@ public class VideoExporter: NSObject {
                 self.addMusic(item: item, audioCompositionTrack: audioCompositionTrack)
             }
         }
-        self.merge(composition: self.mixComposition, duration: timeRange.duration)
+        self.merge(composition: self.mixComposition, duration: timeRange.duration, filename: filename)
     }
     
     public func cancelExport() {
@@ -83,24 +83,24 @@ extension VideoExporter {
     
     /// Add video and audio composition track
     fileprivate func addTrack(item: VideoItem, composition: AVMutableComposition) {
-        let _ = composition.addMutableTrack(withMediaType: .video, preferredTrackID: videoTrackID)
+        let _ = composition.addMutableTrack(withMediaType: AVMediaType.video, preferredTrackID: videoTrackID)
         if item.audio != nil {
-            let _ = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: audioTrackID)
+            let _ = composition.addMutableTrack(withMediaType: AVMediaType.audio, preferredTrackID: audioTrackID)
         }
     }
     
     /// Add video to composition
     fileprivate func insert(item: VideoItem, videoCompositionTrack: AVMutableCompositionTrack, timeRange: CMTimeRange) {
-        guard let videoTrack = item.video.tracks(withMediaType: .video).first else { return }
+        guard let videoTrack = item.video.tracks(withMediaType: AVMediaType.video).first else { return }
         
-        try? videoCompositionTrack.insertTimeRange(timeRange, of: videoTrack, at: kCMTimeZero)
+        try? videoCompositionTrack.insertTimeRange(timeRange, of: videoTrack, at: CMTime.zero)
     }
     
     /// Add music
     fileprivate func addMusic(item: VideoItem, audioCompositionTrack: AVMutableCompositionTrack) {
         guard let audio = item.audio else { return }
         
-        let audioStart = item.audioTimeRange != nil ? item.audioTimeRange!.start : kCMTimeZero
+        let audioStart = item.audioTimeRange != nil ? item.audioTimeRange!.start : CMTime.zero
         let audioDuration = item.audioTimeRange != nil ? item.audioTimeRange!.duration : audio.duration
         let audioTimescale = audio.duration.timescale
         let videoDuratin = item.video.duration
@@ -129,29 +129,29 @@ extension VideoExporter {
             }
         } else {
             let timeRange = CMTimeRange(start: audioStart, duration: videoDuratin)
-            self.addAudio(audio: audio, start: kCMTimeZero, timeRage: timeRange, audioCompositionTrack: audioCompositionTrack)
+            self.addAudio(audio: audio, start: CMTime.zero, timeRage: timeRange, audioCompositionTrack: audioCompositionTrack)
         }
     }
     
     fileprivate func addAudio(audio: AVURLAsset, start: CMTime, timeRage: CMTimeRange, audioCompositionTrack: AVMutableCompositionTrack) {
-        if let track = audio.tracks(withMediaType: .audio).first {
+        if let track = audio.tracks(withMediaType: AVMediaType.audio).first {
             try? audioCompositionTrack.insertTimeRange(timeRage, of: track, at: start)
         }
     }
     
-    fileprivate func merge(composition: AVMutableComposition, duration: CMTime) {
+    fileprivate func merge(composition: AVMutableComposition, duration: CMTime, filename: String) {
         
-        let filename = "merge.mov"
+        let filename = "\(filename).mov"
         let path = K.Path.MovURL.appendingPathComponent(filename)
         print(path)
         self.deletePreviousTmpVideo(url: path)
         
-        self.exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)
+        self.exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough)
         if let exporter = self.exporter {
             exporter.outputURL = path
-            exporter.outputFileType = .mov
+            exporter.outputFileType = AVFileType.mov
             exporter.shouldOptimizeForNetworkUse = true
-            exporter.timeRange = CMTimeRange(start: kCMTimeZero, duration: duration)
+            exporter.timeRange = CMTimeRange(start: CMTime.zero, duration: duration)
             
             let timer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(self.readProgress), userInfo: nil, repeats: true)
             
@@ -159,7 +159,7 @@ extension VideoExporter {
                 
                 timer.invalidate()
                 
-                if exporter.status == AVAssetExportSessionStatus.failed {
+                if exporter.status == AVAssetExportSession.Status.failed {
                     print(#function, exporter.error ?? "unknow error")
                     self.exportingBlock?(false, nil, nil, exporter.error)
                 } else {

@@ -11,14 +11,17 @@ import AVFoundation
 
 public class VideoMaker: NSObject {
     
-    public typealias CompletedCombineBlock = (_ success: Bool, _ videoURL: URL?) -> Void
+    public typealias CompletedCombineBlock = (_ success: Bool, _ error: Error?, _ videoURL: URL?) -> Void
     public typealias Progress = (_ progress: Float) -> Void
-
-    public var images: [UIImage?] = []
+    
+    public let totalNumberOfPhotos: Int
+    public let photoAtIndex: ((Int) -> UIImage?)
+    
     public var transition: ImageTransition = .none
     public var movement: ImageMovement = .none
     public var movementFade: MovementFade = .upLeft
-    public var contentMode = UIViewContentMode.scaleAspectFit
+    
+    public var exportedFileName = "merge"
     
     public var progress: Progress?
     
@@ -30,13 +33,13 @@ public class VideoMaker: NSObject {
     public var definition: CGFloat = 1
     
     /// Video duration
-    public var videoDuration: Int?
+    public var videoDuration: TimeInterval?
     
     /// Every image duration, defualt 2
-    public var frameDuration: Int = 2
+    public var frameDuration: TimeInterval = 2
     
     // Every image animation duration, default 1
-    public var transitionDuration: Int = 1
+    public var transitionDuration: TimeInterval = 1
     
     public var transitionFrameCount = 60
     public var framesToWaitBeforeTransition = 30
@@ -66,22 +69,23 @@ public class VideoMaker: NSObject {
         }
     }
     
-    public override init() {
+    private init(totalNumberOfPhotos: Int = 0, photoAtIndex: ((Int) -> UIImage?)? = nil) {
+        self.totalNumberOfPhotos = totalNumberOfPhotos
+        self.photoAtIndex = photoAtIndex ?? {(_) in return nil}
+        
         super.init()
     }
     
-    public convenience init(images: [UIImage?], transition: ImageTransition) {
-        self.init()
+    public convenience init(totalNumberOfPhotos: Int, photoAtIndex: ((Int) -> UIImage?)?, transition: ImageTransition) {
+        self.init(totalNumberOfPhotos: totalNumberOfPhotos, photoAtIndex: photoAtIndex)
         
-        self.images = images
         self.transition = transition
         self.isMovement = false
     }
     
-    public convenience init(images: [UIImage?], movement: ImageMovement) {
+    public convenience init(totalNumberOfPhotos: Int, photoAtIndex: ((Int) -> UIImage?)?, movement: ImageMovement) {
         self.init()
         
-        self.images = images
         self.movement = movement
         self.isMovement = true
     }
@@ -89,22 +93,28 @@ public class VideoMaker: NSObject {
     public func exportVideo(audio: AVURLAsset?, audioTimeRange: CMTimeRange?, completed: @escaping CompletedCombineBlock) -> VideoMaker {
         self.createDirectory()
         self.currentProgress = 0.0
-        self.combineVideo { (success, url) in
+        self.combineVideo { (success, error, url) in
             if success && url != nil {
                 let video = AVURLAsset(url: url!)
                 let item = VideoItem(video: video, audio: audio, audioTimeRange: audioTimeRange)
                 self.videoExporter = VideoExporter(withe: item)
-                self.videoExporter.export()
                 let timeRate = self.currentProgress
                 self.videoExporter.exportingBlock = { exportCompleted, progress, videoURL, error in
                     
                     DispatchQueue.main.async {
                         self.currentProgress = exportCompleted ? 1 : timeRate + (progress ?? 1) * self.exportTimeRate
-                        completed(exportCompleted, videoURL)
+                        
+                        if exportCompleted {
+                            completed(exportCompleted, nil, videoURL)
+                        } else if let error = error {
+                            completed(false, error, nil)
+                        }
+                        
                     }
                 }
+                self.videoExporter.export(filename: self.exportedFileName)
             } else {
-                completed(false, nil)
+                completed(false, error, nil)
             }
         }
         
@@ -116,62 +126,42 @@ public class VideoMaker: NSObject {
         self.videoExporter.cancelExport()
     }
     
+    fileprivate func hasPhotos() -> Bool {
+        return totalNumberOfPhotos > 0
+    }
+    
     fileprivate func calculateTime() {
-        guard self.images.isEmpty == false else { return }
+        guard hasPhotos() else { return }
         
         let isFadeLong = self.transition == .crossFadeLong
         let hasSetDuration = self.videoDuration != nil
         self.timescale = hasSetDuration ? 100000 : 1
-        let average = hasSetDuration ? Int(self.videoDuration! * self.timescale / self.images.count) : 2
+        let average = hasSetDuration ? Double(self.videoDuration! * Double(self.timescale)) / Double(totalNumberOfPhotos) : 2
         
         if self.isMovement {
             self.frameDuration = 0
             self.transitionDuration = hasSetDuration ? average : 2
         } else {
             self.frameDuration = hasSetDuration ? average : (isFadeLong ? 3 : 2)
-            self.transitionDuration = isFadeLong ? Int(self.frameDuration * 2 / 3 ): Int(self.frameDuration / 2)
+            self.transitionDuration = isFadeLong ? self.frameDuration * 2 / 3 : self.frameDuration / 2
         }
         
-        let frame = self.isMovement ? 20 : 60
-        self.transitionFrameCount = Int(frame * self.transitionDuration / self.timescale)
+        let frame: Double = self.isMovement ? 20 : 60
+        self.transitionFrameCount = Int(frame * self.transitionDuration) / self.timescale;
         self.framesToWaitBeforeTransition = isFadeLong ? self.transitionFrameCount / 3 : self.transitionFrameCount / 2
         
         self.transitionRate = 1 / (Double(self.transitionDuration) / Double(self.timescale))
         self.transitionRate = self.transitionRate == 0 ? 1 : self.transitionRate
         
         if hasSetDuration == false {
-            self.videoDuration = self.frameDuration * self.timescale * self.images.count
+            self.videoDuration = self.frameDuration * Double(self.timescale * totalNumberOfPhotos)
         }
         
         self.calculatorTimeRate()
     }
     
-    fileprivate func makeImageFit() {
-        var newImages = [UIImage?]()
-        for image in self.images {
-            if let image = image {
-                
-                let size = CGSize(width: self.size.width * definition, height: self.size.height * definition)
-                
-                let viewSize = self.isMovement && self.movement == .fade
-                    ? CGSize(width: size.width + self.fadeOffset, height: size.height + self.fadeOffset)
-                    : size
-                let view = UIView(frame: CGRect(origin: .zero, size: viewSize))
-                view.backgroundColor = UIColor.black
-                let imageView = UIImageView(image: image)
-                imageView.contentMode = self.contentMode
-                imageView.backgroundColor = UIColor.black
-                imageView.frame = view.bounds
-                view.addSubview(imageView)
-                let newImage = UIImage(view: view)
-                newImages.append(newImage)
-            }
-        }
-        self.images = newImages
-    }
-    
     fileprivate func combineVideo(completed: CompletedCombineBlock?) {
-        self.makeImageFit()
+        
         if self.isMovement {
             if self.movement == .none {
                 self.isMovement = false
@@ -187,8 +177,8 @@ public class VideoMaker: NSObject {
     }
     
     fileprivate func makeMovementVideo(movement: ImageMovement, completed: CompletedCombineBlock?) {
-        guard self.images.isEmpty == false else {
-            completed?(false, nil)
+        guard hasPhotos() else {
+            completed?(false, nil, nil)
             return
         }
         
@@ -201,42 +191,43 @@ public class VideoMaker: NSObject {
         self.calculateTime()
         
         // writer
-        self.videoWriter = try? AVAssetWriter(outputURL: path, fileType: .mov)
-        
-        guard let videoWriter = self.videoWriter else {
-            print("Create video writer failed")
-            completed?(false, nil)
-            return
-        }
-        
-        // input
-        let videoSettings = [
-            AVVideoCodecKey: AVVideoCodecH264,
-            AVVideoWidthKey: self.size.width,
-            AVVideoHeightKey: self.size.height
-            ] as [String : Any]
-        
-        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoWriter.add(writerInput)
-        
-        // adapter
-        let bufferAttributes = [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
-        ]
-        let bufferAdapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: bufferAttributes)
+        do {
+            let videoWriter = try AVAssetWriter(outputURL: path, fileType: AVFileType.mov)
             
-        self.startCombine(
-            videoWriter: videoWriter,
-            writerInput: writerInput,
-            bufferAdapter: bufferAdapter,
-            completed: { (success, url) in
-                completed?(success, path)
-        })
+            self.videoWriter = videoWriter
+            
+            // input
+            let videoSettings = [
+                AVVideoCodecKey: AVVideoCodecH264,
+                AVVideoWidthKey: self.size.width,
+                AVVideoHeightKey: self.size.height
+                ] as [String : Any]
+            
+            let writerInput = AVAssetWriterInput(mediaType: AVMediaType.video, outputSettings: videoSettings)
+            videoWriter.add(writerInput)
+            
+            // adapter
+            let bufferAttributes = [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
+            ]
+            let bufferAdapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: bufferAttributes)
+            
+            self.startCombine(
+                videoWriter: videoWriter,
+                writerInput: writerInput,
+                bufferAdapter: bufferAdapter,
+                completed: { (success, error, url) in
+                    completed?(success, error, path)
+            })
+        } catch {
+            print("Create video writer failed")
+            completed?(false, error, nil)
+        }
     }
     
     fileprivate func makeTransitionVideo(transition: ImageTransition, completed: CompletedCombineBlock?) {
-        guard self.images.isEmpty == false else {
-            completed?(false, nil)
+        guard hasPhotos() else {
+            completed?(false, nil, nil)
             return
         }
         
@@ -257,38 +248,40 @@ public class VideoMaker: NSObject {
         self.deletePreviousTmpVideo(url: path)
         
         // writer
-        self.videoWriter = try? AVAssetWriter(outputURL: path, fileType: .mov)
-        
-        guard let videoWriter = self.videoWriter else {
+        do {
+            let videoWriter = try AVAssetWriter(outputURL: path, fileType: AVFileType.mov)
+            
+            self.videoWriter = videoWriter
+            
+            // input
+            let videoSettings = [
+                AVVideoCodecKey: AVVideoCodecH264,
+                AVVideoWidthKey: self.size.width,
+                AVVideoHeightKey: self.size.height
+                ] as [String : Any]
+            
+            let writerInput = AVAssetWriterInput(mediaType: AVMediaType.video, outputSettings: videoSettings)
+            videoWriter.add(writerInput)
+            
+            // adapter
+            let bufferAttributes = [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
+            ]
+            let bufferAdapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: bufferAttributes)
+            
+            
+            self.startCombine(
+                videoWriter: videoWriter,
+                writerInput: writerInput,
+                bufferAdapter: bufferAdapter,
+                completed: { (success, error, url) in
+                    completed?(success, error, path)
+            })
+        } catch {
             print("Create video writer failed")
-            completed?(false, nil)
-            return
+            completed?(false, error, nil)
         }
         
-        // input
-        let videoSettings = [
-            AVVideoCodecKey: AVVideoCodecH264,
-            AVVideoWidthKey: self.size.width,
-            AVVideoHeightKey: self.size.height
-        ] as [String : Any]
-        
-        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoWriter.add(writerInput)
-        
-        // adapter
-        let bufferAttributes = [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB)
-        ]
-        let bufferAdapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: bufferAttributes)
-        
-        
-        self.startCombine(
-            videoWriter: videoWriter,
-            writerInput: writerInput,
-            bufferAdapter: bufferAdapter,
-            completed: { (success, url) in
-                completed?(success, path)
-        })
     }
     
     fileprivate func startCombine(videoWriter: AVAssetWriter,
@@ -298,22 +291,22 @@ public class VideoMaker: NSObject {
     {
         
         videoWriter.startWriting()
-        videoWriter.startSession(atSourceTime: kCMTimeZero)
+        videoWriter.startSession(atSourceTime: CMTime.zero)
         
         var presentTime = CMTime(seconds: 0, preferredTimescale: Int32(self.timescale))
         var i = 0
         
         writerInput.requestMediaDataWhenReady(on: self.mediaInputQueue) { 
             while true {
-                if i >= self.images.count {
+                if i >= self.totalNumberOfPhotos {
                     break
                 }
                 
-                let duration = self.isMovement ? self.transitionDuration : self.frameDuration
-                presentTime = CMTimeMake(Int64(i * duration), Int32(self.timescale))
+                let duration = Int(self.isMovement ? self.transitionDuration : self.frameDuration)
+                presentTime = CMTimeMake(value: Int64(i * duration), timescale: Int32(self.timescale))
                 
-                let presentImage = self.images[i]
-                let nextImage: UIImage? = self.images.count > 1 && i != self.images.count - 1 ? self.images[i + 1] : nil
+                let presentImage = self.photoAtIndex(i)
+                let nextImage: UIImage? = self.totalNumberOfPhotos > 1 && i != self.totalNumberOfPhotos - 1 ? self.photoAtIndex(i + 1) : nil
                 
                 presentTime = self.isMovement
                     ? self.appendMovementBuffer(
@@ -333,7 +326,6 @@ public class VideoMaker: NSObject {
                         bufferAdapter: bufferAdapter
                     )
                 
-                self.images[i] = nil
                 i += 1
                 self.changeNextIfNeeded()
             }
@@ -343,7 +335,7 @@ public class VideoMaker: NSObject {
                 DispatchQueue.main.async {
                     print("finished")
                     print(videoWriter.error ?? "no error")
-                    completed?(videoWriter.error == nil, nil)
+                    completed?(videoWriter.error == nil, videoWriter.error, nil)
                 }
             }
         }
@@ -369,12 +361,12 @@ public class VideoMaker: NSObject {
                 bufferAdapter.append(buffer, withPresentationTime: presentTime)
                 self.currentProgress += self.waitTranstionTimeRate
                 
-                let transitionTime = CMTimeMake(Int64(self.transitionDuration), Int32(self.transitionFrameCount * self.timescale))
-                presentTime = CMTimeAdd(presentTime, CMTimeMake(Int64(self.frameDuration - self.transitionDuration), Int32(self.timescale)))
+                let transitionTime = CMTimeMake(value: Int64(self.transitionDuration), timescale: Int32(self.transitionFrameCount * self.timescale))
+                presentTime = CMTimeAdd(presentTime, CMTimeMake(value: Int64(self.frameDuration - self.transitionDuration), timescale: Int32(self.timescale)))
                 
-                if position + 1 < self.images.count {
+                if position + 1 < totalNumberOfPhotos {
                     if self.transition != .none {
-                        let framesToTransitionCount = self.transitionFrameCount - self.framesToWaitBeforeTransition
+                        let framesToTransitionCount = max(1, self.transitionFrameCount - self.framesToWaitBeforeTransition)
                         
                         let timeRate = self.currentProgress
                         for j in 1...framesToTransitionCount {
@@ -410,7 +402,7 @@ public class VideoMaker: NSObject {
         var presentTime = time
         
         if let cgImage = presentImage?.cgImage {
-            let movementTime = CMTimeMake(Int64(self.transitionDuration), Int32(self.transitionFrameCount * self.timescale))
+            let movementTime = CMTimeMake(value: Int64(self.transitionDuration), timescale: Int32(self.transitionFrameCount * self.timescale))
             
             let timeRate = self.currentProgress
             for j in 1...self.transitionFrameCount {
@@ -989,9 +981,9 @@ public class VideoMaker: NSObject {
     }
     
     fileprivate func calculatorTimeRate() {
-        if self.images.isEmpty == false {
+        if hasPhotos() {
             self.exportTimeRate = 1 - self.writerTimeRate
-            let frameTimeRate = self.writerTimeRate / Float(self.images.count)
+            let frameTimeRate = self.writerTimeRate / Float(totalNumberOfPhotos)
             self.waitTranstionTimeRate = self.isMovement ? 0 : frameTimeRate * 0.2
             self.transitionTimeRate = frameTimeRate - self.waitTranstionTimeRate
         }
